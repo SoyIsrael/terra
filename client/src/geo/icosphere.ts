@@ -1,6 +1,6 @@
 // Generates a Goldberg polyhedron (mostly hexagons + 12 pentagons) by
 // subdividing an icosahedron and taking its dual mesh.
-// subdivisions=10 → ~2000 tiles, subdivisions=14 → ~3920 tiles.
+// Each level multiplies faces by 4. subdivisions=3 → ~642 tiles, subdivisions=4 → ~2562 tiles.
 
 export interface V3 { x: number; y: number; z: number }
 
@@ -85,8 +85,9 @@ function subdivide(
 
 // ─── dual mesh (Goldberg polyhedron) ─────────────────────────────────────────
 
-export function generateTiles(subdivisions = 10): HexTile[] {
-  const { verts, faces } = subdivide(...Object.values(baseIcosahedron()) as any, subdivisions);
+export function generateTiles(subdivisions = 4): HexTile[] {
+  const base = baseIcosahedron();
+  const { verts, faces } = subdivide(base.verts, base.faces, subdivisions);
 
   // centroid of each triangle face (projected to sphere) = dual vertex
   const faceCentroids: V3[] = faces.map(([a, b, c]) =>

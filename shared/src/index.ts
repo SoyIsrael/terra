@@ -1,5 +1,3 @@
-// Shared types between client and server
-
 export type PlayerId = string;
 export type TileId = number;
 
@@ -18,6 +16,7 @@ export interface Player {
   capitalTileId: TileId | null;
   resources: PlayerResources;
   isAlive: boolean;
+  ready: boolean;
 }
 
 export interface Tile {
@@ -31,19 +30,22 @@ export interface GameState {
   players: Record<PlayerId, Player>;
   tiles: Record<TileId, Tile>;
   tick: number;
-  dayAngle: number; // 0–360, drives the day/night cycle
+  dayAngle: number;
+  draftOrder: PlayerId[];   // turn order for capital picks
+  draftIndex: number;       // which index in draftOrder is currently picking
 }
 
-// Socket.io event payloads — client → server (intents)
+// client → server
 export interface ClientIntents {
   join: { name: string };
+  ready: void;
   pickCapital: { tileId: TileId };
   expandTo: { tileId: TileId };
-  ready: void;
 }
 
-// Socket.io event payloads — server → client
+// server → client
 export interface ServerEvents {
+  fullState: GameState;
   stateDiff: Partial<GameState>;
   error: { message: string };
 }
