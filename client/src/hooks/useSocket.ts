@@ -13,6 +13,7 @@ function emptyState(): GameState {
     dayAngle: 0,
     draftOrder: [],
     draftIndex: 0,
+    winnerId: null,
   };
 }
 

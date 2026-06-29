@@ -1,3 +1,8 @@
+export { generateTiles } from "./icosphere";
+export type { HexTile, V3 } from "./icosphere";
+export { assignZones, ZONE_GRAIN_YIELD } from "./zones";
+export type { ClimateZone, LandResource, TileInfo } from "./zones";
+
 export type PlayerId = string;
 export type TileId = number;
 
@@ -31,8 +36,9 @@ export interface GameState {
   tiles: Record<TileId, Tile>;
   tick: number;
   dayAngle: number;
-  draftOrder: PlayerId[];   // turn order for capital picks
-  draftIndex: number;       // which index in draftOrder is currently picking
+  draftOrder: PlayerId[];
+  draftIndex: number;
+  winnerId: PlayerId | null;
 }
 
 // client → server

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { generateTiles } from "../geo/icosphere";
-import { assignZones, tileColor, type TileData } from "../geo/tiles";
+import { mergeTileData, tileColor, type TileData } from "../geo/tiles";
 import { buildTileIndex, pickTile } from "../geo/picking";
 import type { GameState } from "@terra/shared";
 
@@ -89,23 +89,75 @@ function paintTile(
   colorAttr.needsUpdate = true;
 }
 
-interface Props {
-  gameState: GameState;
-  onTileClick: (tileId: number) => void;
+interface HoverInfo {
+  tileId: number;
+  cost: number | null; // grain cost to claim, null if not claimable
+  x: number;
+  y: number;
 }
 
-export default function GlobeCanvas({ gameState, onTileClick }: Props) {
+interface Props {
+  gameState: GameState;
+  myId: string | null;
+  onTileClick: (tileId: number) => void;
+  onHover: (info: HoverInfo | null) => void;
+}
+
+export default function GlobeCanvas({ gameState, myId, onTileClick, onHover }: Props) {
   const mountRef = useRef<HTMLDivElement>(null);
   const gameStateRef = useRef(gameState);
+  const myIdRef = useRef(myId);
   const repaintRef = useRef<(() => void) | null>(null);
   const onTileClickRef = useRef(onTileClick);
+  const onHoverRef = useRef(onHover);
   gameStateRef.current = gameState;
+  myIdRef.current = myId;
   onTileClickRef.current = onTileClick;
+  onHoverRef.current = onHover;
 
-  // Repaint tiles whenever server state changes
+  const markersGroupRef = useRef<THREE.Group | null>(null);
+  const tilesRef = useRef<ReturnType<typeof mergeTileData> | null>(null);
+
+  // Repaint tiles whenever server state changes (ownership or day/night)
   useEffect(() => {
     repaintRef.current?.();
-  }, [gameState.tiles, gameState.players]);
+  }, [gameState.tiles, gameState.players, gameState.dayAngle]);
+
+  // Rebuild capital markers whenever players change
+  useEffect(() => {
+    const group = markersGroupRef.current;
+    const tiles = tilesRef.current;
+    if (!group || !tiles) return;
+
+    // Clear old markers
+    while (group.children.length) group.remove(group.children[0]);
+
+    for (const player of Object.values(gameState.players)) {
+      if (player.capitalTileId == null || !player.isAlive) continue;
+      const tile = tiles[player.capitalTileId];
+      if (!tile) continue;
+
+      const color = parseInt(player.color.slice(1), 16);
+      const c = tile.center;
+
+      // Outer ring
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.022, 0.005, 8, 24),
+        new THREE.MeshBasicMaterial({ color })
+      );
+      ring.position.set(c.x * 1.04, c.y * 1.04, c.z * 1.04);
+      ring.lookAt(0, 0, 0);
+      group.add(ring);
+
+      // Center dot
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(0.008, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+      );
+      dot.position.set(c.x * 1.04, c.y * 1.04, c.z * 1.04);
+      group.add(dot);
+    }
+  }, [gameState.players]);
 
   useEffect(() => {
     const mount = mountRef.current!;
@@ -127,9 +179,13 @@ export default function GlobeCanvas({ gameState, onTileClick }: Props) {
     camera.position.z = 3;
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-    const sun = new THREE.DirectionalLight(0xfff5cc, 1.0);
-    sun.position.set(5, 3, 5);
+    const sun = new THREE.DirectionalLight(0xfff5cc, 1.2);
+    sun.position.set(5, 0, 0);
     scene.add(sun);
+
+    // Soft fill light for night side — keeps it visible but clearly darker
+    const nightFill = new THREE.DirectionalLight(0x223366, 0.3);
+    scene.add(nightFill);
 
     const atmosphere = new THREE.Mesh(
       new THREE.SphereGeometry(1.03, 64, 64),
@@ -140,28 +196,58 @@ export default function GlobeCanvas({ gameState, onTileClick }: Props) {
     scene.add(atmosphere);
 
     const rawTiles = generateTiles(4);
-    const tiles = assignZones(rawTiles);
+    const tiles = mergeTileData(rawTiles);
     const { mesh, edges, offsets } = buildGlobeMesh(tiles);
     const tileIndex = buildTileIndex(tiles);
 
+    const markersGroup = new THREE.Group();
+    markersGroupRef.current = markersGroup;
+    tilesRef.current = tiles;
+
     const globe = new THREE.Group();
-    globe.add(mesh, edges);
+    globe.add(mesh, edges, markersGroup);
     scene.add(globe);
 
     const colorAttr = mesh.geometry.getAttribute("color") as THREE.BufferAttribute;
 
-    // Repaint all tiles from server game state (called when stateDiff arrives)
+    // Sun direction in globe-local space (derived from dayAngle)
+    function sunDir(): THREE.Vector3 {
+      const angle = (gameStateRef.current.dayAngle * Math.PI) / 180;
+      return new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle));
+    }
+
+    // Darken a hex color by factor 0–1
+    function darken(hex: number, factor: number): number {
+      const r = Math.floor(((hex >> 16) & 0xff) * factor);
+      const g = Math.floor(((hex >> 8) & 0xff) * factor);
+      const b = Math.floor((hex & 0xff) * factor);
+      return (r << 16) | (g << 8) | b;
+    }
+
+    // Repaint all tiles — factors in ownership, elimination, and day/night
     function repaintFromState() {
       const gs = gameStateRef.current;
+      const sd = sunDir();
+
       for (let i = 0; i < tiles.length; i++) {
         const serverTile = gs.tiles[i];
+        let baseHex: number;
         if (serverTile?.ownerId) {
           const player = gs.players[serverTile.ownerId];
-          const hex = player ? parseInt(player.color.slice(1), 16) : 0x888888;
-          paintTile(colorAttr, offsets, i, hex);
+          // Grey out tiles belonging to eliminated players
+          if (player && !player.isAlive) {
+            baseHex = 0x555555;
+          } else {
+            baseHex = player ? parseInt(player.color.slice(1), 16) : 0x888888;
+          }
         } else {
-          paintTile(colorAttr, offsets, i, tileColor(tiles[i]));
+          baseHex = tileColor(tiles[i]);
         }
+
+        const c = tiles[i].center;
+        const dot = c.x * sd.x + c.y * sd.y + c.z * sd.z;
+        const light = Math.max(0.6, Math.min(1.0, dot * 2 + 0.75));
+        paintTile(colorAttr, offsets, i, darken(baseHex, light));
       }
     }
 
@@ -202,9 +288,22 @@ export default function GlobeCanvas({ gameState, onTileClick }: Props) {
       const hit = pickTile(tileIndex, globe, camera, mouseNDC);
 
       if (hit?.id !== hoveredId) {
-        if (hoveredId >= 0) repaintRef.current?.();  // restore via full repaint
+        if (hoveredId >= 0) repaintRef.current?.();
         hoveredId = hit?.id ?? -1;
-        if (hoveredId >= 0) paintTile(colorAttr, offsets, hoveredId, 0xffffff);
+        if (hoveredId >= 0) {
+          paintTile(colorAttr, offsets, hoveredId, 0xffffff);
+          // Compute cost for tooltip
+          const gs = gameStateRef.current;
+          const existingOwner = gs.tiles[hoveredId]?.ownerId ?? null;
+          const isExpansion = gs.phase === "expansion";
+          let cost: number | null = null;
+          if (isExpansion && existingOwner !== myIdRef.current) {
+            cost = existingOwner ? 15 : 5;
+          }
+          onHoverRef.current({ tileId: hoveredId, cost, x: e.clientX, y: e.clientY });
+        } else {
+          onHoverRef.current(null);
+        }
       }
     };
 
@@ -236,8 +335,12 @@ export default function GlobeCanvas({ gameState, onTileClick }: Props) {
     let animId: number;
     const animate = () => {
       animId = requestAnimationFrame(animate);
-      // auto-rotation disabled during development
       atmosphere.rotation.y = globe.rotation.y;
+
+      // Move sun light to match server dayAngle (in world space, not globe-local)
+      const angle = (gameStateRef.current.dayAngle * Math.PI) / 180;
+      sun.position.set(Math.cos(angle) * 5, 0, Math.sin(angle) * 5);
+      nightFill.position.set(-Math.cos(angle) * 5, 0, -Math.sin(angle) * 5);
       renderer.render(scene, camera);
     };
     animate();
